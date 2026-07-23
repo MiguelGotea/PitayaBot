@@ -28,6 +28,27 @@ jobs:
     steps:
     - name: 📥 Checkout código
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: 🛡️ Validar sentencias estructurales en PHP
+      run: |
+        BEFORE="${{ github.event.before }}"
+        if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then BEFORE="HEAD~1"; fi
+        CHANGED_FILES=$(git diff --name-only $BEFORE ${{ github.sha }} | grep '\.php$' || true)
+        if [ -n "$CHANGED_FILES" ]; then
+          for file in $CHANGED_FILES; do
+            if [ -f "$file" ]; then
+              if grep -iwe -E "(create|drop|alter|rename|truncate)\s+table" "$file"; then
+                echo "❌ ERROR: Se detectó una sentencia estructural en $file. No se subirá al host."
+                exit 1
+              fi
+            fi
+          done
+          echo "✅ Los archivos PHP modificados están limpios."
+        else
+          echo "✅ No hay archivos PHP modificados."
+        fi
 
     - name: 🔑 Configurar SSH
       uses: webfactory/ssh-agent@v0.8.0
