@@ -1,36 +1,22 @@
 'use strict';
 
-const cron = require('node-cron');
-const axios = require('axios');
+const hostinger = require('../api/hostinger');
 const { obtenerCliente } = require('../whatsapp/client');
 const { formatearNumeroWA } = require('../whatsapp/sender');
-const { API_BASE_URL, WSP_TOKEN, WSP_INSTANCIA } = require('../config/api');
 
 /**
- * Obtiene notificaciones transaccionales pendientes
+ * Obtiene notificaciones transaccionales pendientes desde Hostinger
  */
 async function obtenerPendientes() {
-    const resp = await axios.get(`${API_BASE_URL}/api/wsp/pendientes_notificaciones.php`, {
-        headers: { 'X-WSP-Token': WSP_TOKEN },
-        params: { instancia: WSP_INSTANCIA },
-        timeout: 10_000
-    });
-    return resp.data; // { notificaciones: [...] }
+    return await hostinger.obtenerNotificacionesPendientes();
 }
 
 /**
- * Reporta el resultado a la API
+ * Reporta el resultado a Hostinger
  */
 async function reportarResultado(id, resultado, detalle) {
     try {
-        await axios.post(`${API_BASE_URL}/api/wsp/actualizar_notificacion.php`, {
-            id,
-            resultado,
-            detalle
-        }, {
-            headers: { 'X-WSP-Token': WSP_TOKEN },
-            timeout: 10_000
-        });
+        await hostinger.reportarResultadoNotificacion(id, resultado, detalle);
     } catch (err) {
         console.error(`⚠️  [NOTIF] Error reportando resultado para ID ${id}:`, err.message);
     }

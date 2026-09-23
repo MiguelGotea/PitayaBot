@@ -1,9 +1,8 @@
 'use strict';
 
-const axios = require('axios');
+const hostinger = require('../api/hostinger');
 const { obtenerCliente } = require('../whatsapp/client');
 const { enviarUno } = require('../whatsapp/sender');
-const { API_BASE_URL, WSP_TOKEN, WSP_INSTANCIA } = require('../config/api');
 
 // Control anti-ban diario
 let mensajesEnviadosHoy = 0;
@@ -37,33 +36,18 @@ function verificarContadorDiario() {
 }
 
 /**
- * Obtiene campañas pendientes desde api.batidospitaya.com
- * La respuesta también incluye reset_solicitado para detectar cambio de número
+ * Obtiene campañas pendientes desde Hostinger (vía Router: API o Direct DB)
  */
 async function obtenerPendientes() {
-    const resp = await axios.get(`${API_BASE_URL}/api/wsp/pendientes.php`, {
-        headers: { 'X-WSP-Token': WSP_TOKEN },
-        params: { instancia: WSP_INSTANCIA },
-        timeout: 15_000
-    });
-    return resp.data; // { campanas: [...], reset_solicitado: bool }
+    return await hostinger.obtenerCampanasPendientes();
 }
 
 /**
- * Reporta el resultado de cada mensaje enviado a la API
+ * Reporta el resultado de cada mensaje enviado a Hostinger
  */
 async function reportarResultado(campanaId, destinatarioId, resultado, detalle) {
     try {
-        await axios.post(`${API_BASE_URL}/api/wsp/actualizar.php`, {
-            campana_id: campanaId,
-            destinatario_id: destinatarioId,
-            resultado,
-            detalle
-        }, {
-            headers: { 'X-WSP-Token': WSP_TOKEN },
-            timeout: 10_000
-        });
-
+        await hostinger.reportarResultadoCampana(campanaId, destinatarioId, resultado, detalle);
         if (resultado === 'exito') mensajesEnviadosHoy++;
     } catch (err) {
         console.error('⚠️  Error reportando resultado:', err.message);

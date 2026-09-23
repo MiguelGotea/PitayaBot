@@ -238,40 +238,17 @@ async function iniciarWhatsApp() {
 }
 
 /**
- * Notifica a la API el estado actual del VPS/WhatsApp
+ * Notifica a Hostinger (API o BD Directa) el estado actual del VPS/WhatsApp
  * @param {string} estado - conectado|qr_pendiente|desconectado|inicializando
  * @param {string|null} qr - QR en base64 (solo cuando qr_pendiente)
  * @param {string|null} numero - Número WhatsApp vinculado (solo cuando conectado)
  */
 async function reportarEstadoVPS(estado, qr, numero = null) {
     try {
-        const axios = require('axios');
-        const { API_BASE_URL, WSP_TOKEN, WSP_INSTANCIA } = require('../config/api');
-        const url = `${API_BASE_URL}/api/wsp/registrar_sesion.php`;
-        const resp = await axios.post(url, {
-            estado,
-            instancia: WSP_INSTANCIA,
-            qr_base64: qr || null,
-            numero_telefono: numero || null
-        }, {
-            headers: { 'X-WSP-Token': WSP_TOKEN },
-            timeout: 10_000
-        });
-        return resp.data;
+        const hostinger = require('../api/hostinger');
+        return await hostinger.reportarEstadoVPS(estado, qr, numero);
     } catch (err) {
-        const { API_BASE_URL } = require('../config/api');
-        // Log detallado para facilitar diagnóstico
-        if (err.response) {
-            // La API respondió pero con código de error (4xx, 5xx)
-            logMsg(`❌ API respondió con HTTP ${err.response.status} en ${API_BASE_URL}/api/wsp/registrar_sesion.php`);
-            logMsg(`❌ Respuesta: ${JSON.stringify(err.response.data).slice(0, 200)}`);
-        } else if (err.request) {
-            // No hubo respuesta (timeout, DNS, firewall)
-            logMsg(`❌ No hubo respuesta de la API [${API_BASE_URL}]: ${err.message}`);
-            logMsg(`❌ Verifica: DNS, firewall, o que la API esté activa. Code: ${err.code || 'N/A'}`);
-        } else {
-            logMsg(`⚠️  Error al preparar request a la API: ${err.message}`);
-        }
+        logMsg(`⚠️  Error al reportar estado VPS: ${err.message}`);
         return null;
     }
 }
