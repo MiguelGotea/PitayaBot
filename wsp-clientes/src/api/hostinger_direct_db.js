@@ -67,10 +67,10 @@ async function reportarEstadoVPS(estado, qr, numero = null) {
         const numGuardar = (estado === 'desconectado') ? null : (numero || null);
         const ipVPS = '198.211.97.243';
 
-        // Upsert en wsp_sesion_vps_
+        // Upsert en wsp_sesion_vps_ (CONVERT_TZ a CST -06:00 para alinear con America/Managua del ERP)
         await p.query(`
             INSERT INTO wsp_sesion_vps_ (instancia, estado, qr_base64, numero_telefono, ultimo_ping, ip_vps)
-            VALUES (?, ?, ?, ?, NOW(), ?)
+            VALUES (?, ?, ?, ?, CONVERT_TZ(NOW(), '+00:00', '-06:00'), ?)
             ON DUPLICATE KEY UPDATE
                 estado          = VALUES(estado),
                 qr_base64       = VALUES(qr_base64),
