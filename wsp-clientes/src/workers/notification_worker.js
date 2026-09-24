@@ -1,7 +1,7 @@
 'use strict';
 
 const hostinger = require('../api/hostinger');
-const { obtenerCliente } = require('../whatsapp/client');
+const { obtenerCliente, obtenerEstadoActual } = require('../whatsapp/client');
 const { formatearNumeroWA } = require('../whatsapp/sender');
 
 /**
@@ -34,7 +34,8 @@ async function ejecutarCicloNotificaciones() {
         ejecutandoCicloNotif = true;
         
         const client = obtenerCliente();
-        if (!client) {
+        const estado = obtenerEstadoActual();
+        if (!client || !client.info || estado !== 'conectado') {
             ejecutandoCicloNotif = false;
             return;
         }

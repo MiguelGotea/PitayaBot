@@ -134,6 +134,18 @@ async function iniciarWhatsApp() {
         }
     });
 
+    clienteWA.on('authenticated', async () => {
+        if (currentInitId !== sessionIntentId) return;
+        logMsg(`🔐 [ID:${currentInitId}] WhatsApp autenticado con éxito — sincronizando chats...`);
+        estadoActual = 'inicializando';
+        qrBase64 = null;
+        await reportarEstadoVPS('inicializando', null);
+    });
+
+    clienteWA.on('loading_screen', (percent, message) => {
+        logMsg(`⏳ [ID:${currentInitId}] Sincronizando WhatsApp Web: ${percent}% — ${message}`);
+    });
+
     // Adjuntar listeners de errores de Chrome inmediatamente (no solo en 'ready')
     // Captura crashes durante la fase de QR antes de que esté autenticado
     const adjuntarMonitoreoCrash = () => {
