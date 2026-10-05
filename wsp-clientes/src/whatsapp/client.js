@@ -10,6 +10,7 @@ let qrBase64 = null;
 let clienteWA = null;
 let sessionIntentId = 0; // Para cancelar inits obsoletos durante el delay de stagger
 let readyHook = null; // Hook para re-vincular workers tras reset
+let readyTimeoutHandle = null; // FIX: Timeout de seguridad para cuando 'ready' nunca llega tras autenticarse
 
 const logMsg = (msg) => {
     const pid = process.pid;
@@ -77,6 +78,23 @@ async function iniciarWhatsApp() {
     cleanupLocks();
 
     const { WSP_INSTANCIA } = require('../config/api');
+
+    // ── FIX #1: Destruir cliente anterior ANTES de crear uno nuevo
+    //    Evita listeners duplicados (causa del evento 'authenticated' x3)
+    if (clienteWA) {
+        logMsg(`🧹 [ID:${currentInitId}] Destruyendo instancia anterior antes de crear nueva...`);
+        try {
+            clienteWA.removeAllListeners();
+            await Promise.race([
+                clienteWA.destroy(),
+                new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 5000))
+            ]);
+        } catch (e) {
+            logMsg(`⚠️ Error destruyendo instancia anterior: ${e.message}`);
+        }
+        clienteWA = null;
+    }
+
     clienteWA = new Client({
         authStrategy: new LocalAuth({
             clientId: WSP_INSTANCIA,
@@ -116,6 +134,30 @@ async function iniciarWhatsApp() {
     });
 
     // ── Eventos ──
+
+    clienteWA.on('authenticated', async () => {
+        if (currentInitId !== sessionIntentId) return;
+        logMsg(`🔐 [ID:${currentInitId}] WhatsApp autenticado con éxito — sincronizando chats...`);
+        estadoActual = 'inicializando';
+        qrBase64 = null;
+        await reportarEstadoVPS('inicializando', null);
+
+        // ── FIX #2: Timeout de seguridad — si 'ready' no llega en 3 min, reiniciar Chrome
+        //    Evita quedarse pegado en 'inicializando' indefinidamente
+        if (readyTimeoutHandle) clearTimeout(readyTimeoutHandle);
+        readyTimeoutHandle = setTimeout(async () => {
+            if (estadoActual === 'inicializando' && currentInitId === sessionIntentId) {
+                logMsg(`⌛ [ID:${currentInitId}] 'ready' no llegó en 3 minutos tras autenticación. Reiniciando Chrome...`);
+                resetearSesion(false).catch(e => logMsg(`Error en auto-reset tras timeout: ${e.message}`));
+            }
+        }, 180_000); // 3 minutos
+    });
+
+    clienteWA.on('auth_failure', async (msg) => {
+        if (currentInitId !== sessionIntentId) return;
+        logMsg(`❌ [ID:${currentInitId}] Fallo de autenticación: ${msg}`);
+        resetearSesion(true).catch(e => logMsg(`Error en reset tras auth_failure: ${e.message}`));
+    });
 
     clienteWA.on('qr', async (qr) => {
         try {
@@ -171,6 +213,13 @@ async function iniciarWhatsApp() {
 
     clienteWA.on('ready', async () => {
         if (currentInitId !== sessionIntentId) return;
+
+        // ── FIX #3: Cancelar timeout de 'ready' al conectarse exitosamente
+        if (readyTimeoutHandle) {
+            clearTimeout(readyTimeoutHandle);
+            readyTimeoutHandle = null;
+        }
+
         const numero = clienteWA.info?.wid?.user || null;
         logMsg(`✅ [ID:${currentInitId}] WhatsApp Web conectado y listo — Número: ${numero || 'desconocido'}`);
         estadoActual = 'conectado';
@@ -186,13 +235,6 @@ async function iniciarWhatsApp() {
             logMsg(`🔗 Ejecutando ReadyHook para vincular workers...`);
             readyHook(clienteWA);
         }
-    });
-
-    clienteWA.on('auth_failure', async (msg) => {
-        if (currentInitId !== sessionIntentId) return;
-        logMsg(`❌ [ID:${currentInitId}] Fallo de autenticación: ${msg}`);
-        // FALLO CRÍTICO: Borrar carpeta para permitir nuevo QR
-        resetearSesion(true).catch(e => logMsg(`Error en reset tras auth_failure: ${e.message}`));
     });
 
     clienteWA.on('change_state', state => {
@@ -286,10 +328,18 @@ async function resetearSesion(borrarSesion = false) {
     sessionIntentId++; // Invalidar cualquier inicialización en cola
     logMsg(`🔄 [ID:${sessionIntentId}] Iniciando reset de sesión WhatsApp (borrarCarpeta: ${borrarSesion})...`);
 
+    // ── FIX: Cancelar timeout de ready pendiente al hacer reset
+    if (readyTimeoutHandle) {
+        clearTimeout(readyTimeoutHandle);
+        readyTimeoutHandle = null;
+        logMsg(`⏹️  Timeout de 'ready' cancelado.`);
+    }
+
     // 1. Destruir cliente actual (sin esperar demasiado)
     if (clienteWA) {
         logMsg('🔌 Destruyendo cliente anterior...');
         try {
+            clienteWA.removeAllListeners(); // ── FIX: limpiar listeners antes de destruir
             await Promise.race([
                 clienteWA.destroy(),
                 new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout destruyendo cliente')), 5000))
