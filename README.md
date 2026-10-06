@@ -435,6 +435,23 @@ chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
 echo '/swapfile none swap sw 0 0' >> /etc/fstab
 ```
 
+**Optimización obligatoria — reducir `swappiness`** (evita swap thrash con 4 instancias Chrome):
+```bash
+# Aplicar ahora (sin reiniciar):
+sysctl vm.swappiness=10
+
+# Persistir entre reinicios:
+echo 'vm.swappiness=10' >> /etc/sysctl.conf
+```
+> Con `swappiness=60` (default) el kernel empieza a usar swap con 40% de RAM libre. Con `=10` solo lo hace cuando queda ~10%. Esto evita que el VPS se "trabe" con SSH tardando minutos en responder.
+
+**Señal de alerta — deploy de GitHub Actions tardó 5+ minutos:**
+Si un deploy que normalmente dura segundos tarda 5-6 minutos, es swap thrash. El banner SSH mostrará `Swap usage: 90%+`. Verificar:
+```bash
+free -m      # Swap usado > 80%?
+dmesg | grep -i oom  # ¿OOM Killer mató algún proceso?
+```
+
 > Para 2+ instancias simultáneas se recomienda upgrade a Droplet 2GB RAM (~$6/mes).
 
 ---
