@@ -484,11 +484,39 @@ $TOKEN = WSP_TOKEN_SECRETO;
 
 ---
 
-### 8. Bloqueo en `initialize()` — WhatsApp Web Protocol
+### 8. Bloqueo en `initialize()` — Incompatibilidad Chrome/whatsapp-web.js
 
-**Causa:** Versión de `whatsapp-web.js` obsoleta.
+**Síntoma:** El proceso se autentica (`authenticated` llega) pero `ready` nunca dispara. El log muestra solo `💓 Heartbeat — estado: inicializando` indefinidamente. `loading_screen` **nunca aparece** en los logs.
 
-**Solución:** Actualizar a `whatsapp-web.js@^1.34.6` o superior. Al actualizar, borrar `node_modules` y `package-lock.json` en el VPS antes de `npm install`.
+**Causa más frecuente:** Chrome se actualizó automáticamente a una versión mayor incompatible con la versión instalada de `whatsapp-web.js`. El protocolo interno de Puppeteer cambia entre versiones principales de Chrome.
+
+**Diagnóstico rápido:**
+```bash
+# Ver versión de Chrome instalada
+google-chrome-stable --version
+
+# Ver versión de whatsapp-web.js instalada
+grep '"version"' /var/www/wsp-clientes/node_modules/whatsapp-web.js/package.json
+
+# Si loading_screen NUNCA aparece entre authenticated y el timeout → incompatibilidad confirmada
+grep 'loading_screen\|authenticated\|ready' /root/.pm2/logs/wsp-clientes-out.log | tail -20
+```
+
+**Solución — reinstalar dependencias limpias (resuelve 90% de casos):**
+```bash
+pm2 stop wsp-clientes
+cd /var/www/wsp-clientes
+rm -rf node_modules package-lock.json
+npm install --production
+pm2 restart wsp-clientes --update-env
+```
+
+> ⚠️ **NO usar `--single-process` ni `--js-flags=--max-old-space-size`** en los args de Puppeteer — el README sección 2 documenta que `--single-process` crashea Chrome moderno.
+
+**Si el reinstall no resuelve:** Actualizar Chrome:
+```bash
+apt update && apt install --only-upgrade google-chrome-stable
+```
 
 ---
 
@@ -585,3 +613,57 @@ const hI = parseInt(process.env.HORA_INICIO_ENVIO?.split(':')[0] ?? '7');
    ```javascript
    clienteWA.pupPage.on('error', err => { /* forzar resetearSesion() */ });
    ```
+
+---
+
+### 14. Auto-actualización de Chrome rompe whatsapp-web.js (Oct 2026)
+
+> **Post-mortem del incidente del 5 de octubre 2026**
+
+**Síntoma:** El servicio dejó de conectar sin ningún cambio en el código ni en el número. El proceso se autenticaba pero `ready` nunca llegaba. El evento `loading_screen` nunca aparecía en los logs. El ciclo era: `authenticated` → 3 min de espera → timeout → reset → `authenticated` → loop.
+
+**Contexto que confundió el diagnóstico:**
+- El número había pasado por un intento de migración a Meta Business API (que Meta rechazó)
+- Se recreó WhatsApp Business en el número
+- Esto hizo pensar que el problema era el número, pero no lo era
+
+**Causa raíz:** `google-chrome-stable` se actualizó automáticamente de ~v125 a **v154** (apt lo actualiza sin aviso). La versión v1.34.6 de `whatsapp-web.js` usa el protocolo interno de Chrome 101 y no es compatible con Chrome 154.
+
+**Cómo confirmar:**
+```bash
+google-chrome-stable --version  # Si muestra v130+ con wweb.js 1.34.6 → incompatibilidad
+# Y en logs: loading_screen NUNCA aparece después de authenticated
+```
+
+**Solución que funcionó (60 segundos):**
+```bash
+pm2 stop wsp-clientes
+cd /var/www/wsp-clientes
+rm -rf node_modules package-lock.json
+npm install --production
+pm2 restart wsp-clientes --update-env
+# → loading_screen: 100% aparece en logs → ready → conectado
+```
+
+**Mejoras aplicadas al código durante este incidente:**
+
+1. **`client.js` — Timeout de 3 min en `authenticated`**: Si `ready` no llega en 3 minutos tras autenticarse, el proceso hace reset automático de Chrome (sin borrar sesión). Evita quedarse pegado indefinidamente en `inicializando`.
+
+2. **`client.js` — `removeAllListeners()` antes de destruir**: Previene acumulación de listeners duplicados al crear múltiples instancias de `Client` en el mismo proceso.
+
+3. **`campanas_wsp.js` (ERP) — Lógica de QR modal mejorada**:
+   - Ya no muestra "¡Código QR vinculado con éxito!" prematuramente durante `inicializando`
+   - Muestra spinner con contador de tiempo real mientras sincroniza
+   - Flag `yaEscaneado` distingue entre: VPS reiniciando Chrome (normal → mostrar nuevo QR) vs desconexión real (error → mostrar mensaje)
+   - Timeout de 4 minutos con mensaje claro si el VPS no responde
+
+**Para prevenir en el futuro:**
+```bash
+# Bloquear Chrome en la versión actual (evitar auto-update)
+apt-mark hold google-chrome-stable
+
+# Para desbloquear y actualizar manualmente cuando se quiera:
+apt-mark unhold google-chrome-stable && apt upgrade google-chrome-stable
+```
+
+> ⚠️ El VPS tiene 4 instancias Chrome corriendo simultáneamente en 2GB RAM. Cuando hay problemas de `ready`, PRIMERO hacer `npm install` limpio antes de asumir problemas de número, RAM, o configuración.

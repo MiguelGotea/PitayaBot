@@ -102,7 +102,7 @@ async function iniciarWhatsApp() {
         }),
         webVersionCache: {
             type: 'remote',
-            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1018911162-alpha.html'
+            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1033870439.html'
         },
         puppeteer: {
             headless: 'new',
