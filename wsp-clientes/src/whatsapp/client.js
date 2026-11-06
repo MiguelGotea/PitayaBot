@@ -127,7 +127,12 @@ async function iniciarWhatsApp() {
                 '--metrics-recording-only',
                 '--mute-audio',
                 '--no-default-browser-check',
-                '--disable-features=IsolateOrigins,site-per-process,AudioServiceOutOfProcess'
+                '--disable-features=IsolateOrigins,site-per-process,AudioServiceOutOfProcess',
+                // FIX: Evitar acumulación de caché en disco (causa del colapso Nov 2026)
+                '--disk-cache-size=0',
+                '--media-cache-size=0',
+                '--aggressive-cache-discard',
+                '--disable-application-cache'
             ]
         }
     });

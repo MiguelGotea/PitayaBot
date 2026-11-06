@@ -91,7 +91,12 @@ async function iniciarWhatsApp() {
                 '--disable-gpu',
                 '--disable-background-timer-throttling',
                 '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding'
+                '--disable-renderer-backgrounding',
+                // FIX: Evitar acumulación de caché en disco (causa del colapso Nov 2026)
+                '--disk-cache-size=0',
+                '--media-cache-size=0',
+                '--aggressive-cache-discard',
+                '--disable-application-cache',
             ]
         }
     });
