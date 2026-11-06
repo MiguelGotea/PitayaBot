@@ -14,9 +14,8 @@ api.batidospitaya.com/api/wsp/   ← puente central (PHP)
 api.batidospitaya.com/api/bot/   ← endpoints del PitayaBot (PHP)
        ↑ polling cada 60s
 VPS DigitalOcean — múltiples instancias Node.js + whatsapp-web.js
-   ├── wsp-clientes  :3001  → Campañas de marketing a clientesclub
+   ├── wsp-clientes  :3001  → Campañas de marketing + Notificaciones transaccionales
    ├── wsp-crmbot    :3003  → Bot CRM automatizado
-   ├── wsp-planilla  :3005  → Notificaciones de planilla a colaboradores
    └── wsp-pitayabot :3007  → Asistente virtual IA para colaboradores
        ↓ envía mensajes
 WhatsApp Web
@@ -33,39 +32,41 @@ WhatsApp Web
 scripts/
 ├── setup.sh                            # Instalación VPS Ubuntu (ejecutar UNA VEZ)
 └── test_api_connection.js              # Diagnóstico: verifica conectividad VPS → API
-wsp-clientes/                           # PM2 :3001 — Campañas marketing (AUTÓNOMA)
+wsp-clientes/                           # PM2 :3001 — Campañas + Notificaciones transaccionales
 ├── src/
-│   ├── app.js                          # Solo arranca campaign_worker
+│   ├── app.js                          # Arranca campaign_worker + notification_worker
 │   ├── config/api.js
 │   ├── whatsapp/  (client.js, sender.js)
-│   └── workers/campaign_worker.js
+│   └── workers/
+│       ├── campaign_worker.js          # Worker campañas de marketing
+│       └── notification_worker.js      # Worker notificaciones transaccionales (cada 15s)
 ├── .env.example
 ├── ecosystem.config.js                 # Config PM2 solo de esta instancia
 └── package.json
 wsp-crmbot/                             # PM2 :3003 — Bot CRM (AUTÓNOMA)
 ├── src/
-│   ├── app.js                          # Solo arranca crm_bot_worker
+│   ├── app.js
 │   ├── config/api.js
 │   ├── nlp/  (TF-IDF, Naive Bayes — exclusivo de este bot)
 │   ├── whatsapp/  (client.js, sender.js)
 │   └── workers/crm_bot_worker.js
 ├── .env.example
-├── ecosystem.config.js                 # Config PM2 solo de esta instancia
+├── ecosystem.config.js
 └── package.json
-wsp-planilla/                           # PM2 :3005 — Notif. planilla (AUTÓNOMA)
+wsp-pitayabot/                          # PM2 :3007 — Asistente IA colaboradores (AUTÓNOMA)
 ├── src/
-│   ├── app.js                          # Solo arranca planilla_worker
+│   ├── app.js
 │   ├── config/api.js
 │   ├── whatsapp/  (client.js, sender.js)
-│   └── workers/planilla_worker.js
+│   └── workers/
 ├── .env.example
-├── ecosystem.config.js                 # Config PM2 solo de esta instancia
+├── ecosystem.config.js
 └── package.json
 ```
 
 > **Principio de independencia:** Cada `wsp-*/src/` es completamente autónomo. No comparte archivos con ninguna otra instancia. Borrar una no afecta las demás.
 
-### Estructura en el VPS (`/var/www/`)
+### Estructura en el VPS
 
 ```
 /var/www/
@@ -78,73 +79,268 @@ wsp-planilla/                           # PM2 :3005 — Notif. planilla (AUTÓNO
 │   ├── src/
 │   ├── .env
 │   └── logs/
-├── wsp-planilla/          # PM2: wsp-planilla :3005
-│   ├── src/
-│   ├── .env
-│   └── logs/
-└── whatsapp-service/      # ⚠️ RESIDUAL — puede borrarse: rm -rf /var/www/whatsapp-service
+└── wsp-pitayabot/         # PM2: wsp-pitayabot :3007
+    ├── src/
+    ├── .env
+    └── logs/
+
+/root/presupuestos-ferreterias/   # App independiente — NO es un bot WhatsApp
 ```
 
 ---
 
 ## Instancias activas
 
-| Nombre PM2 | Puerto | Uso | Estado |
-|-----------|--------|-----|--------|
-| `wsp-clientes`  | 3001 | Campañas de marketing a `clientesclub` | ✅ Activo |
-| `wsp-crmbot`    | 3003 | Bot CRM automatizado con NLP | ✅ Activo |
-| `wsp-planilla`  | 3005 | Notificaciones de planilla a `Operarios` | ✅ Activo |
-| `wsp-pitayabot` | 3007 | Asistente virtual IA para colaboradores | ✅ Activo |
+| Nombre PM2 | Puerto | Uso | STARTUP_DELAY_MS |
+|-----------|--------|-----|-----------------|
+| `wsp-pitayabot`  | 3007 | Asistente virtual IA para colaboradores | 5 000 ms |
+| `wsp-crmbot`     | 3003 | Bot CRM automatizado con NLP | 90 000 ms |
+| `wsp-clientes`   | 3001 | Campañas de marketing + Notificaciones transaccionales | 180 000 ms |
+| `presupuestos-ferreterias` | — | App de presupuestos (no WhatsApp) | — |
+
+> **Arranque escalonado obligatorio:** Los 3 Chrome no deben iniciar al mismo tiempo en un Droplet 1 vCPU. El `STARTUP_DELAY_MS` escala el inicio 0 → 90s → 180s para que el CPU se recupere entre cada inicialización.
+
+---
+
+## 🔴 Post-Mortem — Colapso de Droplet (Nov 2026)
+
+> **Síntoma:** CPU al 100% permanente, SSH tardaba minutos en responder, todos los bots en loop de crash, `campanas_wsp.php` mostraba "Servicio inactivo".
+
+### Causa raíz: Reacción en cadena por disco lleno
+
+#### Fase 1 — Acumulación silenciosa de caché (meses)
+
+Cada instancia Chrome guardaba datos en `.wwebjs_auth_*/session-*/Default/`:
+- `Cache/`, `Code Cache/`, `GPUCache/`, `DawnCache/`, `ShaderCache/`
+
+Sin depuración automática, estos directorios crecieron a **~3.2 GB totales**. Sumado a:
+- `/var/log/journal` → 1.8 GB
+- `~/.pm2/logs/` → 207 MB
+
+El disco llegó al **85%** hasta que Chrome no pudo escribir más y crasheó.
+
+#### Fase 2 — Loop de crash por `restart_delay` corto
+
+Con `restart_delay: 10000` (10 s) y `max_restarts` ilimitado, PM2 reiniciaba Chrome cada 10 segundos. En un servidor 1 vCPU, levantar 3 Chrome casi simultáneamente colapsa la RAM (cada Chrome necesita ~400-500 MB al iniciar).
+
+La RAM se agotó → el kernel usó SWAP en disco → Disk I/O 100-150 MB/s → CPU 100% → procesos Chrome quedaron como **zombis** sin poder cerrarse.
+
+#### Fase 3 — Falso positivo del heartbeat (bug de código)
+
+Una vez estabilizado el servidor, enviar **15 notificaciones acumuladas en lote** disparó el nuevo problema:
+- `notification_worker` enviaba 15 mensajes × 2 s delay = ~30 s con Chrome ocupado
+- El heartbeat (cada 60 s) llamaba `getState()` con timeout de 30 s
+- Chrome no podía responder `getState()` mientras enviaba mensajes por WebSocket
+- Heartbeat interpretaba "Chrome congelado" → `resetearSesion()` innecesario
+- El reset reiniciaba Chrome → subía el CPU → más timeouts → loop
+
+### Fixes aplicados al código
+
+#### 1. `--disk-cache-size=0` y limpieza de caché al arrancar (`client.js`)
+
+```js
+// En puppeteer args:
+'--disk-cache-size=0',
+'--media-cache-size=0',
+'--aggressive-cache-discard',
+'--disable-application-cache'
+```
+
+```js
+// Antes de cada clienteWA.initialize(), limpia los subdirectorios de caché:
+const cacheSubdirs = ['Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'ShaderCache'];
+cacheSubdirs.forEach(dir => {
+    const p = path.join(_authPath, `session-${_instancia}`, 'Default', dir);
+    if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
+});
+```
+
+> ⚠️ La limpieza elimina **solo subdirectorios de caché**, nunca la carpeta de sesión completa. La sesión (cookies, credenciales) se conserva para no tener que reescanear QR.
+
+#### 2. Arranque escalonado vía `STARTUP_DELAY_MS` (`app.js` + `ecosystem.config.js`)
+
+```js
+// app.js — delay antes de iniciar Chrome
+const startupDelay = parseInt(process.env.STARTUP_DELAY_MS || '15000', 10);
+await new Promise(r => setTimeout(r, startupDelay));
+```
+
+```js
+// ecosystem.config.js — valores por instancia
+env: {
+    STARTUP_DELAY_MS: '180000'  // wsp-clientes espera 3 min
+}
+```
+
+#### 3. PM2 `restart_delay` y `max_restarts` más conservadores (`ecosystem.config.js`)
+
+```js
+restart_delay: 60000,    // antes: 10000 — 60 s entre reinicios (evita crash loop)
+max_restarts: 5,         // antes: 10
+max_memory_restart: '400M'
+```
+
+#### 4. Contador de timeouts consecutivos — no reiniciar por pico temporal (`app.js`)
+
+```js
+// Requiere 3 TIMEOUT_GET_STATE seguidos antes de hacer reset
+// Un pico de CPU que cause 1-2 timeouts se absorbe sin reiniciar Chrome
+let _timeoutConsecutivos = 0;
+const MAX_TIMEOUTS_ANTES_RESET = 3;
+
+// En el catch del getState():
+_timeoutConsecutivos++;
+if (_timeoutConsecutivos >= MAX_TIMEOUTS_ANTES_RESET) {
+    await resetearSesion(false);
+}
+// En el try exitoso:
+_timeoutConsecutivos = 0;
+```
+
+#### 5. Heartbeat inteligente: skip `getState()` mientras se envían mensajes (`app.js` + `notification_worker.js`)
+
+```js
+// notification_worker.js expone:
+function estaEnviandoNotificaciones() { return ejecutandoCicloNotif; }
+
+// app.js — heartbeat salta el test de Chrome si está en envío activo:
+if (estaEnviandoNotificaciones()) {
+    logApp(`💓 Heartbeat — estado: conectado | engine: BUSY (enviando notificaciones)`);
+    _timeoutConsecutivos = 0;
+    await reportarEstadoVPS(estado, null);
+    return; // No llamar getState()
+}
+```
+
+#### 6. Watchdog de "atascado en inicializando" (`app.js`)
+
+```js
+// Si lleva más de 8 min en estado 'inicializando', fuerza un reset automático.
+// Corrige el caso donde initialize() completa pero el evento 'ready' nunca llega.
+let _inicializandoDesde = null;
+const MAX_INICIALIZANDO_MS = 8 * 60 * 1000;
+
+if (estado === 'inicializando') {
+    if (!_inicializandoDesde) _inicializandoDesde = Date.now();
+    const elapsed = Date.now() - _inicializandoDesde;
+    if (elapsed > MAX_INICIALIZANDO_MS) {
+        await resetearSesion(false); // reset sin borrar sesión
+    }
+    return;
+} else {
+    _inicializandoDesde = null;
+}
+```
+
+### Fixes aplicados directamente en el Droplet (una vez)
+
+```bash
+# 1. Limpiar caché Chrome acumulada
+find /var/www -name "Cache" -type d | xargs rm -rf
+find /var/www -name "Code Cache" -type d | xargs rm -rf
+find /var/www -name "GPUCache" -type d | xargs rm -rf
+
+# 2. Rotar journal y logs PM2
+journalctl --vacuum-time=3d
+pm2 flush
+
+# 3. Matar procesos Chrome zombis
+pkill -9 -f chrome
+
+# 4. Cron semanal de limpieza (ya configurado — no revertir)
+# crontab -e → entrada:
+# 0 3 * * 0 find /var/www -path "*/Default/Cache" -type d -exec rm -rf {} + 2>/dev/null; journalctl --vacuum-time=7d
+```
+
+> ✅ El cron semanal de limpieza **debe mantenerse** en el droplet. No revertir.
+
+### Señales de alerta tempranas
+
+| Señal | Qué hacer |
+|-------|-----------|
+| CPU > 80% sostenido por 5+ min | `pgrep -c chrome` — si > 8, hay zombis. `pkill -9 -f chrome` y `pm2 restart all` |
+| SSH tarda 30+ seg en responder | El servidor está en swap thrash. Verificar `free -h`. Puede necesitar reboot. |
+| `campanas_wsp.php` → "Servicio inactivo" | `pm2 logs wsp-clientes --lines 30` — buscar `TIMEOUT_GET_STATE`, `inicializando`, errores |
+| Disk I/O > 50 MB/s sostenido | Chrome usando swap. `df -h /` — si > 70%, limpiar caché y journal |
+| `pm2 status` muestra muchos reinicios (↺ > 10) | `pm2 logs <nombre> --lines 50` para ver el error raíz |
+
+### Comandos de diagnóstico rápido
+
+```bash
+# Estado general del sistema
+pm2 status
+free -h
+df -h /
+pgrep -c chrome         # Chrome headless activos (normal: 3-6 por bot conectado)
+
+# Ver qué está consumiendo CPU
+top -bn1 | head -20
+
+# Logs en tiempo real
+pm2 logs wsp-clientes --lines 50
+
+# Si el disco está lleno (> 80%)
+du -sh /var/www/*/     # Ver qué directorio pesa más
+du -sh /var/log/journal
+du -sh ~/.pm2/logs/
+
+# Limpiar en emergencia
+pm2 flush                                    # Limpiar logs PM2
+journalctl --vacuum-time=3d                 # Limpiar journal viejos
+find /var/www -name "GPUCache" -type d -exec rm -rf {} + 2>/dev/null
+pkill -9 -f chrome                          # Matar Chrome zombis
+```
+
+### Restauración de emergencia completa
+
+Si el droplet está 100% bloqueado (SSH sin responder), usar la consola web de DigitalOcean:
+
+```bash
+# Paso 1 — Liberar recursos inmediatamente
+pm2 stop all
+pkill -9 -f chrome
+
+# Paso 2 — Limpiar disco
+journalctl --vacuum-time=3d
+pm2 flush
+find /var/www -path "*/Default/Cache" -type d -exec rm -rf {} + 2>/dev/null
+find /var/www -path "*/Default/Code Cache" -type d -exec rm -rf {} + 2>/dev/null
+find /var/www -path "*/Default/GPUCache" -type d -exec rm -rf {} + 2>/dev/null
+
+# Paso 3 — Verificar espacio recuperado
+df -h /
+free -h
+
+# Paso 4 — Reiniciar bots en orden
+pm2 start /var/www/wsp-pitayabot/ecosystem.config.js
+sleep 30
+pm2 start /var/www/wsp-crmbot/ecosystem.config.js
+sleep 90
+pm2 start /var/www/wsp-clientes/ecosystem.config.js
+
+pm2 save
+```
 
 ---
 
 ## 🐛 Post-Mortem — Incidente "Servicio Desconectado" (21-Apr-2026)
 
-> **Síntoma:** Todos los bots aparecían como "Desconectado" en el ERP a pesar de funcionar correctamente (PitayaBot respondía mensajes, campañas se enviaban, etc.).
+> **Síntoma:** Todos los bots aparecían como "Desconectado" en el ERP a pesar de funcionar correctamente.
 
 ### Causa raíz: 3 bugs en cadena
 
 #### Bug 1 — `CONVERT_TZ` incorrecto en `registrar_sesion.php` ⚠️ CRÍTICO
 
-El heartbeat del VPS escribe `ultimo_ping` usando:
-
 ```sql
--- ❌ ANTES (incorrecto):
+-- ❌ ANTES: restaba 6h adicionales (servidor MySQL ya está en CST)
 CONVERT_TZ(NOW(), '+00:00', '-06:00')
 
--- ✅ DESPUÉS (correcto):
+-- ✅ DESPUÉS:
 NOW()
 ```
 
-**¿Por qué fallaba?** El servidor MySQL de Hostinger ya está en zona horaria CST (UTC-6). La función `CONVERT_TZ` asumía que `NOW()` era UTC y restaba 6 horas adicionales, almacenando una hora 6h en el pasado. Cuando `status.php` comparaba con `time()` (PHP en CST), obtenía siempre un `seg_desde_ping` de ~21600 segundos (6h), muy por encima del umbral de 180s → siempre `activo = false`.
-
-```
-MySQL NOW()  = 15:38 CST  (servidor ya en CST)
-CONVERT_TZ() = 09:38      (restó 6h extra — ¡incorrecto!)
-PHP time()   = 21:38 UTC  = 15:38 CST
-strtotime("09:38" CST) = 15:38 UTC
-
-diff = 21:38 UTC − 15:38 UTC = 6 horas → activo: false ✗
-```
-
-**Archivos afectados:**
-- `api.batidospitaya.com/api/wsp/registrar_sesion.php` → cambiado a `NOW()`
-
----
-
 #### Bug 2 — Filas duplicadas en `wsp_sesion_vps_` (UNIQUE KEY faltante)
 
-El `ON DUPLICATE KEY UPDATE` del INSERT no funcionaba porque la tabla **no tenía constraint `UNIQUE` en `instancia`**. Cada heartbeat insertaba una fila nueva en lugar de actualizar la existente.
-
-`status.php` leía con `LIMIT 1` sin `ORDER BY`, devolviendo siempre la fila más antigua (primer insert), cuyo `ultimo_ping` crecía con el tiempo.
-
-**Fix aplicado:**
-```sql
--- status.php ahora lee la fila más reciente:
-ORDER BY ultimo_ping DESC LIMIT 1
-```
-
-**Pendiente — ejecutar en phpMyAdmin:**
 ```sql
 -- Limpiar filas duplicadas (conservar la más reciente por instancia)
 DELETE t1 FROM wsp_sesion_vps_ t1
@@ -156,40 +352,14 @@ INNER JOIN wsp_sesion_vps_ t2
 ALTER TABLE wsp_sesion_vps_ ADD UNIQUE KEY uq_instancia (instancia);
 ```
 
----
-
 #### Bug 3 — ERP llamaba a `api.batidospitaya.com` directamente (caído tras migración proxy)
 
-Al migrar a `proxy.batidospitaya.com`, el servidor ERP (Hostinger) perdió acceso directo a `api.batidospitaya.com`. `campanas_wsp_get_status.php` usaba la URL antigua.
-
-**Fix aplicado:** Ahora intenta el proxy primero y `api.batidospitaya.com` como fallback:
 ```php
-// erp.batidospitaya.com/modulos/marketing/ajax/campanas_wsp_get_status.php
+// campanas_wsp_get_status.php — intenta proxy primero, api como fallback
 $urls = [
     'proxy' => 'https://proxy.batidospitaya.com/api/wsp/status.php?instancia=wsp-clientes',
     'api'   => 'https://api.batidospitaya.com/api/wsp/status.php?instancia=wsp-clientes',
 ];
-```
-
----
-
-### Flujo de diagnóstico (para referencia futura)
-
-```bash
-# 1. Verificar que el ERP llega a la API y ver el ultimo_ping real
-curl -s "https://proxy.batidospitaya.com/api/wsp/status.php?instancia=wsp-clientes" | python3 -m json.tool
-# → Revisar: seg_desde_ping > 180? Si sí, heartbeat no actualiza BD.
-
-# 2. Simular heartbeat desde el VPS (probar si la escritura funciona)
-curl -s -X POST "https://proxy.batidospitaya.com/api/wsp/registrar_sesion.php" \
-  -H "Content-Type: application/json" \
-  -H "X-WSP-Token: <TOKEN>" \
-  -d '{"estado":"qr_pendiente","instancia":"wsp-clientes","qr_base64":null,"numero_telefono":null}'
-# → Volver a llamar status.php y comparar ultimo_ping. Si no cambió → Bug 2 (filas duplicadas).
-# → Si devuelve error → revisar token o conectividad.
-
-# 3. Ver logs del servicio
-pm2 logs wsp-clientes --lines 30 --nostream | grep -iE "heartbeat|error|❌|no se pudo"
 ```
 
 ---
@@ -200,62 +370,39 @@ pm2 logs wsp-clientes --lines 30 --nostream | grep -iE "heartbeat|error|❌|no s
 
 ### En GitHub (VS Code local)
 
-1. Crear carpeta `DigitalOcean/wsp-nueva/` con su propio código:
-   - `src/app.js` — solo importa el worker de esta instancia
+1. Crear carpeta `wsp-nueva/` con su propio código:
+   - `src/app.js` — importa el worker de esta instancia + heartbeat con watchdog
    - `src/workers/nuevo_worker.js` — lógica de polling a la API
    - `src/whatsapp/client.js`, `sender.js` — copiados y adaptados
    - `src/config/api.js`
-   - `.env.example` — con `PORT=XXXX` y `WSP_INSTANCIA=wsp-nueva`
-   - `ecosystem.config.js` — solo el bloque de esta instancia
+   - `.env.example` — con `PORT=XXXX`, `WSP_INSTANCIA=wsp-nueva`, `STARTUP_DELAY_MS`
+   - `ecosystem.config.js` — `restart_delay: 60000`, `max_restarts: 5`, `max_memory_restart: '400M'`
    - `package.json`
 
-2. En `.github/workflows/deploy-vps.yml`, agregar bloque rsync y PM2 restart:
-   ```yaml
-   - name: 📤 Deploy wsp-nueva → /var/www/wsp-nueva/
-     run: |
-       rsync -avz \
-         --exclude='node_modules/' --exclude='logs/' --exclude='.env' --exclude='.wwebjs_auth*' \
-         -e "ssh -o StrictHostKeyChecking=no" \
-         ./wsp-nueva/ ${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}:/var/www/wsp-nueva/
-   ```
-   ```yaml
-   pm2 restart wsp-nueva --update-env || true
-   ```
-
-3. Hacer push → GitHub Actions despliega el código automáticamente.
+2. En `.github/workflows/deploy-vps.yml`, agregar bloque rsync y PM2 restart.
 
 ### En el VPS (SSH — solo una vez)
 
 ```bash
-# Instalar dependencias (primera vez)
 cd /var/www/wsp-nueva
 npm install --production
-
-# Configurar variables
 cp .env.example .env && nano .env
-# Llenar: WSP_TOKEN (token único), PORT, WSP_INSTANCIA
+# Llenar: WSP_TOKEN, PORT, WSP_INSTANCIA, STARTUP_DELAY_MS
 
-# 4. Abrir puerto en FIREWALL (OBLIGATORIO)
-# Sin este paso, el ERP no podrá hacer "Ping" ni enviar mensajes manuales
 sudo ufw allow XXXX/tcp
-
-# 5. Registrar en PM2
 pm2 start ecosystem.config.js
 pm2 save
 ```
 
-**Después de esto: solo push. PM2 lo reinicia automáticamente en cada deploy.**
-
 ### Checklist nueva instancia
 
-- [ ] Puerto único no usado (3007, 3009…)
-- [ ] **Abrir puerto en Firewall DigitalOcean** (Inbound TCP) y asignar Droplet.
-- [ ] **Abrir puerto en Firewall VPS (UFW)**: `sudo ufw allow XXXX/tcp`.
-- [ ] Token único en `.env` — la API lo usa para identificar la instancia
+- [ ] Puerto único no usado (3001, 3003, 3007…)
+- [ ] **Abrir puerto en Firewall DigitalOcean** (Inbound TCP)
+- [ ] **Abrir puerto en Firewall VPS (UFW)**: `sudo ufw allow XXXX/tcp`
+- [ ] `STARTUP_DELAY_MS` escalonado (el último bot: mayor delay)
+- [ ] Token único en `.env`
 - [ ] `clientId` único en `client.js` → `LocalAuth({ clientId: 'wsp-nueva' })`
-- [ ] Workers propios — sin importar archivos de otras instancias
-- [ ] Endpoints API propios en `api.batidospitaya.com/api/wsp/`
-- [ ] Tool ERP registrado en `tools_erp` con permisos
+- [ ] `ecosystem.config.js` con `restart_delay: 60000` y `max_restarts: 5`
 - [ ] Escanear QR para vincular número desde el ERP
 
 ---
@@ -264,8 +411,8 @@ pm2 save
 
 | Secret | Valor |
 |--------|-------|
-| `DO_SSH_KEY` | Clave privada SSH del Droplet | id_ed25519
-| `DO_HOST` | IP del Droplet | 198.211.97.243
+| `DO_SSH_KEY` | Clave privada SSH del Droplet (id_ed25519) |
+| `DO_HOST` | IP del Droplet: `198.211.97.243` |
 | `DO_USER` | `root` |
 
 ---
@@ -274,10 +421,7 @@ pm2 save
 
 ```bash
 ssh root@<IP_DROPLET>
-
-# Ejecutar el script de setup (instala Node.js 20, PM2, Chrome, configura firewall)
 bash /var/www/wsp-clientes/scripts/setup.sh
-# ⚠️ Este script asume que el código ya fue desplegado via GitHub Actions
 ```
 
 ---
@@ -287,10 +431,11 @@ bash /var/www/wsp-clientes/scripts/setup.sh
 ```env
 API_BASE_URL=https://api.batidospitaya.com
 WSP_TOKEN=<token_unico_de_esta_instancia>
-WSP_INSTANCIA=wsp-clientes          # nombre del proceso PM2
-PORT=3001                           # puerto único
-HORA_INICIO_ENVIO=07:00             # horario de envío (00:00 = sin límite inferior)
-HORA_FIN_ENVIO=20:00                # (24:00 = sin límite superior, modo pruebas)
+WSP_INSTANCIA=wsp-clientes
+PORT=3001
+STARTUP_DELAY_MS=180000       # ms a esperar antes de iniciar Chrome (escalonado)
+HORA_INICIO_ENVIO=07:00
+HORA_FIN_ENVIO=20:00
 MAX_MENSAJES_DIA=150
 MAX_MENSAJES_POR_HORA=50
 DELAY_MIN_SEGUNDOS=8
@@ -306,12 +451,7 @@ DELAY_MAX_SEGUNDOS=25
 | Delay entre mensajes | 8–25s aleatorio |
 | Máx. mensajes/día | 150–200 (configurable por `.env`) |
 | Máx. mensajes/hora | 50 (configurable por `.env`) |
-| Horario de envío | **wsp-clientes** y **wsp-planilla**: sin restricción (`HORA_FIN=24:00`) |
-| | **wsp-crmbot**: 07:00–20:00 (el bot responde en horario de atención) |
 | Sesión persistente | `LocalAuth` — no re-escanea QR salvo desconexión |
-| Variables disponibles | `{{nombre}}`, `{{sucursal}}`, `{{fecha_planilla}}` |
-
-> ⚠️ Usar número **dedicado** al negocio, no personal.
 
 ---
 
@@ -321,20 +461,18 @@ DELAY_MAX_SEGUNDOS=25
 |----------|--------|------|-------------|
 | `ping.php` | GET | No | Health check |
 | `status.php` | GET | No | Estado VPS |
-| `pendientes.php` | GET | Token | Campañas marketing pendientes |
+| `pendientes.php` | GET | Token | Campañas pendientes |
 | `actualizar.php` | POST | Token | VPS reporta resultado por destinatario |
-| `pendientes_planilla.php` | GET | Token | Notificaciones de planilla pendientes |
-| `actualizar_planilla.php` | POST | Token | VPS reporta resultado de planilla |
 | `registrar_sesion.php` | POST | Token | Heartbeat + estado + QR base64 |
 
 ## Endpoints del VPS (Llamados por el ERP)
+
 | Endpoint | Método | Puerto | Descripción |
 |----------|--------|--------|-------------|
 | `/health` | GET | 300X | Verifica si Express está vivo |
 | `/status` | GET | 300X | Estado interno y QR |
 | `/send` | POST | 300X | Envío manual (CRM) |
-| `/ping` | POST | 300X | Prueba de conexión (envía mensaje de prueba) |
-
+| `/ping` | POST | 300X | Prueba de conexión |
 | `/reset` | POST | 300X | Fuerza cierre y nuevo QR |
 
 ---
@@ -345,8 +483,9 @@ DELAY_MAX_SEGUNDOS=25
 pm2 status                                  # Ver todas las instancias activas
 pm2 logs wsp-clientes --lines 30            # Logs de una instancia
 pm2 restart wsp-clientes --update-env       # Reiniciar recargando .env
-pm2 stop wsp-planilla                       # Detener sin afectar otras
-pm2 delete wsp-planilla                     # Eliminar instancia de PM2
+pm2 stop wsp-clientes                       # Detener sin afectar otras
+pm2 delete wsp-clientes                     # Eliminar instancia de PM2
+pm2 save                                    # Persistir lista de procesos actual
 free -h                                     # Verificar RAM y swap
 curl http://localhost:3001/health           # Health check interno
 ```
@@ -356,14 +495,12 @@ curl http://localhost:3001/health           # Health check interno
 pm2 stop wsp-clientes
 rm -rf /var/www/wsp-clientes/.wwebjs_auth_wsp-clientes
 pm2 restart wsp-clientes --update-env
-# Escanear QR desde el ERP (badge → click o modal QR)
+# Escanear QR desde el ERP
 ```
 
 ---
 
 ## Cambio de Número WhatsApp
-
-### Flujo
 
 ```
 ERP → clic "Cambiar Número"
@@ -384,12 +521,12 @@ badge → 🟢 Conectado
 |--------|-------|-------------|
 | `conectado` | 🟢 Verde | WhatsApp vinculado y listo |
 | `qr_pendiente` | 🟡 Amarillo | Esperando escaneo QR |
-| `reset_pendiente` | 🟠 Naranja | Cambio en proceso |
-| `desconectado` | 🔴 Rojo | VPS caído o sin heartbeat |
+| `inicializando` | 🔵 Azul | Cargando — normal hasta 5 min |
+| `desconectado` | 🔴 Rojo | VPS caído o sin heartbeat >3 min |
 
 ---
 
-## 🔴 Problemas encontrados en producción
+## 🔴 Problemas conocidos en producción
 
 ### 1. Chromium Snap no funciona como root (Ubuntu 24.04)
 
@@ -412,61 +549,82 @@ apt install -y /tmp/chrome.deb
 
 **Causa:** Flag deprecado. Combinado con `--no-zygote` provoca crash inmediato.
 
-**Args correctos para VPS Ubuntu (root):**
+**Args correctos y completos para VPS Ubuntu (root):**
 ```js
 args: [
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-    '--disable-gpu', '--disable-accelerated-2d-canvas', '--no-first-run',
-    '--disable-extensions', '--disable-background-networking',
-    '--metrics-recording-only', '--js-flags=--max-old-space-size=512'
+    '--disable-gpu', '--no-zygote', '--no-first-run',
+    '--disable-extensions', '--disable-background-networking', '--disable-breakpad',
+    '--disable-component-update', '--disable-domain-reliability', '--disable-sync',
+    '--disable-translate', '--metrics-recording-only', '--mute-audio',
+    '--no-default-browser-check',
+    '--disable-features=IsolateOrigins,site-per-process,AudioServiceOutOfProcess',
+    // Anti-throttling (obligatorio para evitar Zombie Bot)
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    // Anti-acumulación de caché en disco
+    '--disk-cache-size=0', '--media-cache-size=0',
+    '--aggressive-cache-discard', '--disable-application-cache'
 ]
 ```
 
 ---
 
-### 3. RAM insuficiente en Droplet 1GB
+### 3. RAM insuficiente en Droplet 1GB con 3 bots Chrome
 
-**Causa:** Chrome headless necesita ~400-500MB en el pico de inicio.
+**Causa:** Cada Chrome necesita ~400-500 MB al iniciar.
 
-**Solución:** 2GB de swap (persiste entre reinicios):
+**Solución mínima — 2GB de swap:**
 ```bash
 fallocate -l 2G /swapfile
 chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
 echo '/swapfile none swap sw 0 0' >> /etc/fstab
 ```
 
-**Optimización obligatoria — reducir `swappiness`** (evita swap thrash con 4 instancias Chrome):
+**Optimización obligatoria — `swappiness=10`:**
 ```bash
-# Aplicar ahora (sin reiniciar):
 sysctl vm.swappiness=10
-
-# Persistir entre reinicios:
 echo 'vm.swappiness=10' >> /etc/sysctl.conf
 ```
-> Con `swappiness=60` (default) el kernel empieza a usar swap con 40% de RAM libre. Con `=10` solo lo hace cuando queda ~10%. Esto evita que el VPS se "trabe" con SSH tardando minutos en responder.
 
-**Señal de alerta — deploy de GitHub Actions tardó 5+ minutos:**
-Si un deploy que normalmente dura segundos tarda 5-6 minutos, es swap thrash. El banner SSH mostrará `Swap usage: 90%+`. Verificar:
+> Con `swappiness=60` (default) el kernel empieza a usar swap con 40% de RAM libre. Con `=10` solo lo hace cuando queda ~10%. Esto evita swap thrash y SSH tardando minutos.
+
+**Señal de alerta:**
 ```bash
-free -m      # Swap usado > 80%?
+free -m          # Swap > 80%?
 dmesg | grep -i oom  # ¿OOM Killer mató algún proceso?
 ```
 
-> Para 2+ instancias simultáneas se recomienda upgrade a Droplet 2GB RAM (~$6/mes).
+> Para 3+ instancias Chrome simultáneas, **se recomienda upgrade a Droplet 2GB RAM** (~$6/mes adicionales). Elimina todos los problemas de CPU/OOM de raíz.
 
 ---
 
-### 4. Badge ERP muestra "Desconectado" aunque el VPS esté activo
+### 4. Badge ERP muestra "Desconectado" / "Servicio inactivo"
 
-**Causa:** `status.php` considera inactivo si `ultimo_ping` tiene >2 minutos.
+**Verificación rápida:**
+```bash
+# 1. ¿El bot está corriendo?
+pm2 status
 
-**Solución ya implementada:** Heartbeat en `app.js` cada 60s via `reportarEstadoVPS()`.
+# 2. ¿El heartbeat está actualizando la BD?
+curl -s "https://proxy.batidospitaya.com/api/wsp/status.php?instancia=wsp-clientes"
+# → revisar seg_desde_ping: si > 180, el heartbeat no llega a la BD
+
+# 3. ¿Qué dice el log?
+pm2 logs wsp-clientes --lines 30 --nostream
+```
+
+**Causas frecuentes:**
+- Bot en estado `inicializando` por > 3 min → watchdog lo auto-recupera a los 8 min
+- `ultimo_ping` desactualizado por error de conexión MySQL → transitorio, se recupera solo
+- Bot crasheado y PM2 en `restart_delay` → esperar 60 s y verificar de nuevo
 
 ---
 
 ### 5. Imágenes fallan — "Invalid URL"
 
-**Causa:** `imagen_url` guardada como ruta relativa en la BD (ej: `/modulos/.../img.jpg`).
+**Causa:** `imagen_url` guardada como ruta relativa en la BD.
 
 **Solución en `pendientes.php`:**
 ```php
@@ -477,49 +635,57 @@ if (!empty($campana['imagen_url']) && str_starts_with($campana['imagen_url'], '/
 
 ---
 
-### 6. Token 401 en test_endpoints.php
+### 6. Desconexión silenciosa tras inactividad (Zombie Bot)
 
-**Solución:** Importar `auth.php` en lugar de hardcodear el token:
-```php
-require_once __DIR__ . '/auth.php';
-$TOKEN = WSP_TOKEN_SECRETO;
-```
+**Causa:** Chrome aplica background throttling a pestañas headless.
 
----
-
-### 7. Endpoints con MySQLi en proyecto PDO
-
-| MySQLi | PDO equivalente |
-|--------|----------------|
-| `bind_param('si', $a, $b)` | `execute([':a' => $a, ':b' => $b])` |
-| `get_result()->fetch_all()` | `fetchAll()` |
-| `affected_rows` | `rowCount()` |
-| `insert_id` | `$conn->lastInsertId()` |
-| `begin_transaction()` | `$conn->beginTransaction()` |
-
-> ⚠️ LIMIT con PDO **requiere** `PDO::PARAM_INT` explícito en `bindValue`.
+**Solución ya implementada:**
+1. Flags `--disable-background-timer-throttling` etc. en `client.js`
+2. `sendPresenceAvailable()` cada 60s en el heartbeat
+3. `getState()` cada 60s con timeout para detectar congelamiento
 
 ---
 
-### 8. Bloqueo en `initialize()` — Incompatibilidad Chrome/whatsapp-web.js
+### 7. `🌙 Fuera del horario de envío` — `.env` no actualiza con `pm2 restart`
 
-**Síntoma:** El proceso se autentica (`authenticated` llega) pero `ready` nunca dispara. El log muestra solo `💓 Heartbeat — estado: inicializando` indefinidamente. `loading_screen` **nunca aparece** en los logs.
+**Causa:** `pm2 restart` sin `--update-env` no recarga el `.env`.
 
-**Causa más frecuente:** Chrome se actualizó automáticamente a una versión mayor incompatible con la versión instalada de `whatsapp-web.js`. El protocolo interno de Puppeteer cambia entre versiones principales de Chrome.
-
-**Diagnóstico rápido:**
+**Solución:**
 ```bash
-# Ver versión de Chrome instalada
-google-chrome-stable --version
-
-# Ver versión de whatsapp-web.js instalada
-grep '"version"' /var/www/wsp-clientes/node_modules/whatsapp-web.js/package.json
-
-# Si loading_screen NUNCA aparece entre authenticated y el timeout → incompatibilidad confirmada
-grep 'loading_screen\|authenticated\|ready' /root/.pm2/logs/wsp-clientes-out.log | tail -20
+pm2 restart wsp-clientes --update-env
 ```
 
-**Solución — reinstalar dependencias limpias (resuelve 90% de casos):**
+Y en código usar `??` en lugar de `||` para valores de hora:
+```js
+const hI = parseInt(process.env.HORA_INICIO_ENVIO?.split(':')[0] ?? '7');
+```
+
+---
+
+### 8. `stuck in inicializando` — evento `ready` nunca llega
+
+**Síntoma:** `💓 Heartbeat — estado: inicializando | engine: N/A` por más de 5 minutos.
+
+**Causa A — CPU saturado:** Chrome está sincronizando WhatsApp Web pero el servidor no tiene recursos para completar la carga JavaScript en tiempo razonable. Puede tardar 3-10 min en un Droplet 1GB sobrecargado.
+
+**Causa B — Incompatibilidad Chrome/whatsapp-web.js:** Chrome se actualizó automáticamente. El evento `loading_screen` **nunca aparece** entre `authenticated` y el timeout.
+
+**Diagnóstico:**
+```bash
+# ¿Aparece loading_screen en logs? Si nunca aparece → Causa B (incompatibilidad)
+pm2 logs wsp-clientes --lines 50 --nostream | grep -E "loading_screen|authenticated|ready"
+
+# Versión de Chrome
+google-chrome-stable --version
+```
+
+**Solución Causa A** (el watchdog de 8 min ya lo maneja automáticamente):
+```bash
+# Si necesitas forzarlo manualmente:
+pm2 restart wsp-clientes
+```
+
+**Solución Causa B — reinstall limpio:**
 ```bash
 pm2 stop wsp-clientes
 cd /var/www/wsp-clientes
@@ -528,159 +694,89 @@ npm install --production
 pm2 restart wsp-clientes --update-env
 ```
 
-> ⚠️ **NO usar `--single-process` ni `--js-flags=--max-old-space-size`** en los args de Puppeteer — el README sección 2 documenta que `--single-process` crashea Chrome moderno.
-
-**Si el reinstall no resuelve:** Actualizar Chrome:
+**Prevenir auto-actualización de Chrome:**
 ```bash
-apt update && apt install --only-upgrade google-chrome-stable
+apt-mark hold google-chrome-stable
+# Para actualizar manualmente cuando quieras:
+apt-mark unhold google-chrome-stable && apt upgrade google-chrome-stable
 ```
 
 ---
 
-### 9. Estabilidad con múltiples instancias en paralelo
+### 9. Notificaciones transaccionales marcadas como `error` durante reset de Chrome
 
-1. **RAM**: Obligatorio upgrade a 2GB Droplet para 2+ instancias simultáneas.
-2. **Aislamiento de sesión**: Cada instancia usa `LocalAuth({ clientId: 'wsp-NOMBRE' })`.
-3. **SingletonLock**: `client.js` limpia automáticamente locks de Chrome al arrancar.
+**Causa:** El `notification_worker` seguía ejecutando su loop de envío cuando Chrome se reiniciaba, y marcaba los mensajes no enviados como `error` en la BD.
+
+**Solución ya implementada en `notification_worker.js`:**
+- Verifica `obtenerEstadoActual() !== 'conectado'` antes de cada envío
+- Detecta errores de Chrome muerto (`detached Frame`, `Target closed`, `Protocol error`)
+- Si Chrome muere mid-loop, **hace `break` sin marcar como `error`** → quedan como `pendiente` para reintento automático en el próximo ciclo de 15s
 
 ---
 
-### 10. `Target closed` o `Browser closed`
+### 10. `Target closed` / `Browser closed` / OOM Killer
 
-**Causa:** Chrome matado por OOM Killer.
+**Causa:** Chrome matado por el kernel por memoria insuficiente.
 
-**Diagnóstico:** `dmesg | grep -i oom`
+**Diagnóstico:**
+```bash
+dmesg | grep -i oom
+free -h
+```
 
-**Fix:** Verificar swap activo (`free -h`), asegurar `--disable-gpu` y `--no-sandbox` presentes.
+**Fix:** Verificar swap activo, `--disable-gpu` y `--no-sandbox` presentes, considerar upgrade del Droplet.
 
 ---
 
 ### 11. Mantenimiento de Chrome y whatsapp-web.js
 
 ```bash
-# Actualizar Chrome si deja de conectar
+# Actualizar Chrome (solo cuando sea necesario — ver punto 8)
+apt-mark unhold google-chrome-stable
 apt update && apt install --only-upgrade google-chrome-stable
+apt-mark hold google-chrome-stable
 
-# Actualizar whatsapp-web.js (requiere limpiar node_modules en VPS)
-# En package.json: "whatsapp-web.js": "^1.34.6"
-# En VPS:
-rm -rf node_modules package-lock.json && npm install --production
-```
+# Actualizar whatsapp-web.js
+cd /var/www/wsp-clientes
+rm -rf node_modules package-lock.json
+npm install --production
+pm2 restart wsp-clientes --update-env
 
-```bash
-# Rotar logs si crecen mucho
+# Rotar logs PM2
 pm2 install pm2-logrotate
 ```
 
 ---
 
-### 12. `🌙 Fuera del horario de envío` — .env no actualiza con pm2 restart
+### 12. `SyntaxError: Identifier 'WSP_INSTANCIA' has already been declared`
 
-**Causa:** `pm2 restart` sin `--update-env` no recarga el `.env`. Además, `HORA_INICIO=00:00` → `parseInt('00') || 7 = 7` por falsy.
+**Causa:** Al añadir un bloque nuevo que importa `WSP_INSTANCIA` con `const { WSP_INSTANCIA } = require(...)`, si el archivo ya tenía esa misma declaración más abajo, Node.js lanza SyntaxError.
 
-**Solución:**
-```bash
-pm2 restart wsp-planilla --update-env
-```
-**Y en código:** usar `??` en lugar de `||` para los valores de hora:
+**Solución:** Usar `process.env.WSP_INSTANCIA` directamente en el nuevo bloque, sin redeclarar:
 ```js
-const hI = parseInt(process.env.HORA_INICIO_ENVIO?.split(':')[0] ?? '7');
+const _instancia = process.env.WSP_INSTANCIA || 'wsp-clientes';
 ```
-> `HORA_FIN_ENVIO=24:00` desactiva el límite superior de horario (útil para pruebas).
 
 ---
 
-### 13. Desconexión silenciosa tras minutos de inactividad (Zombie Bot)
+### 13. GitHub Actions hace `pm2 restart` que no recarga `ecosystem.config.js`
 
-**Problema:** El Heartbeat dice `conectado`, pero el bot no envía ni recibe mensajes después de ~10-15 minutos sin interactuar.
+**Problema:** `pm2 restart <name> --update-env` no recarga cambios en `env:` del `ecosystem.config.js`. Solo recarga variables del `.env`.
 
-**Causa:** Linux y Chrome aplican *Background Throttling* a la pestaña headless oculta para ahorrar CPU/RAM, congelando el WebSocket de WhatsApp Web. Adicionalmente, WhatsApp puede cerrar la conexión en sus servidores si no detecta actividad o presencia ("En línea").
-
-**Solución Implementada (Obligatoria para toda nueva instancia):**
-
-1. **Banderas Anti-Throttling (`client.js`)**:
-   En la inicialización de `puppeteer`, se requieren estas flags vitales:
-   ```javascript
-   args: [
-       // ... otras flags ...
-       '--disable-background-timer-throttling',
-       '--disable-backgrounding-occluded-windows',
-       '--disable-renderer-backgrounding'
-   ]
-   ```
-
-2. **Monitoreo de Congelamiento Interno (`app.js`)**:
-   Dentro del `setInterval` de 60s, obligar a Puppeteer a evaluar un script en la página con un timeout para cazar cuelgues, y reportarlo en el log (`engine: CONNECTED`):
-   ```javascript
-   // app.js -> setInterval(..., 60000)
-   let realWaState = await Promise.race([
-       cliente.getState(),
-       new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT_GET_STATE')), 10000))
-   ]);
-   ```
-
-3. **Keep-Alive Heartbeat (`app.js`)**:
-   Enviar el estado "En línea" forzoso cada 60 segundos para evitar que Meta cierre el socket:
-   ```javascript
-   await cliente.sendPresenceAvailable();
-   ```
-
-4. **Deep-Debugging Crash Hooks (`client.js`)**:
-   Escuchar el objeto nativo de página de Chrome en el evento `ready` para matar Node.js si la página tira un `Aw, Snap!`:
-   ```javascript
-   clienteWA.pupPage.on('error', err => { /* forzar resetearSesion() */ });
-   ```
+**Para que surtan efecto los cambios de ecosystem:**
+```bash
+pm2 delete wsp-clientes
+pm2 start /var/www/wsp-clientes/ecosystem.config.js
+pm2 save
+```
 
 ---
 
-### 14. Auto-actualización de Chrome rompe whatsapp-web.js (Oct 2026)
+### 14. `reset_solicitado = 1` loop infinito
 
-> **Post-mortem del incidente del 5 de octubre 2026**
+**Causa:** El botón "Cambiar Número" en el ERP escribe `reset_solicitado = 1`. Si el bot lo lee, borra la sesión y se reinicia, pero si la tabla no tiene la fila del bot (fue borrada), el próximo insert la crea con `reset_solicitado = 1` por defecto y el bot queda en loop eterno.
 
-**Síntoma:** El servicio dejó de conectar sin ningún cambio en el código ni en el número. El proceso se autenticaba pero `ready` nunca llegaba. El evento `loading_screen` nunca aparecía en los logs. El ciclo era: `authenticated` → 3 min de espera → timeout → reset → `authenticated` → loop.
-
-**Contexto que confundió el diagnóstico:**
-- El número había pasado por un intento de migración a Meta Business API (que Meta rechazó)
-- Se recreó WhatsApp Business en el número
-- Esto hizo pensar que el problema era el número, pero no lo era
-
-**Causa raíz:** `google-chrome-stable` se actualizó automáticamente de ~v125 a **v154** (apt lo actualiza sin aviso). La versión v1.34.6 de `whatsapp-web.js` usa el protocolo interno de Chrome 101 y no es compatible con Chrome 154.
-
-**Cómo confirmar:**
-```bash
-google-chrome-stable --version  # Si muestra v130+ con wweb.js 1.34.6 → incompatibilidad
-# Y en logs: loading_screen NUNCA aparece después de authenticated
+**Solución vía phpMyAdmin:**
+```sql
+UPDATE wsp_sesion_vps_ SET reset_solicitado = 0 WHERE instancia = 'wsp-clientes';
 ```
-
-**Solución que funcionó (60 segundos):**
-```bash
-pm2 stop wsp-clientes
-cd /var/www/wsp-clientes
-rm -rf node_modules package-lock.json
-npm install --production
-pm2 restart wsp-clientes --update-env
-# → loading_screen: 100% aparece en logs → ready → conectado
-```
-
-**Mejoras aplicadas al código durante este incidente:**
-
-1. **`client.js` — Timeout de 3 min en `authenticated`**: Si `ready` no llega en 3 minutos tras autenticarse, el proceso hace reset automático de Chrome (sin borrar sesión). Evita quedarse pegado indefinidamente en `inicializando`.
-
-2. **`client.js` — `removeAllListeners()` antes de destruir**: Previene acumulación de listeners duplicados al crear múltiples instancias de `Client` en el mismo proceso.
-
-3. **`campanas_wsp.js` (ERP) — Lógica de QR modal mejorada**:
-   - Ya no muestra "¡Código QR vinculado con éxito!" prematuramente durante `inicializando`
-   - Muestra spinner con contador de tiempo real mientras sincroniza
-   - Flag `yaEscaneado` distingue entre: VPS reiniciando Chrome (normal → mostrar nuevo QR) vs desconexión real (error → mostrar mensaje)
-   - Timeout de 4 minutos con mensaje claro si el VPS no responde
-
-**Para prevenir en el futuro:**
-```bash
-# Bloquear Chrome en la versión actual (evitar auto-update)
-apt-mark hold google-chrome-stable
-
-# Para desbloquear y actualizar manualmente cuando se quiera:
-apt-mark unhold google-chrome-stable && apt upgrade google-chrome-stable
-```
-
-> ⚠️ El VPS tiene 4 instancias Chrome corriendo simultáneamente en 2GB RAM. Cuando hay problemas de `ready`, PRIMERO hacer `npm install` limpio antes de asumir problemas de número, RAM, o configuración.
