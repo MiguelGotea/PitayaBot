@@ -118,8 +118,10 @@ async function arrancar() {
         });
     });
 
-    logApp('⏳ Esperando 15s antes de arrancar WhatsApp...');
-    await new Promise(r => setTimeout(r, 15_000));
+    logApp('⏳ Esperando antes de arrancar WhatsApp para estabilizar sistema...');
+    const startupDelay = parseInt(process.env.STARTUP_DELAY_MS || '15000', 10);
+    logApp(`⏱️ Delay de arranque: ${startupDelay / 1000}s (configurable via STARTUP_DELAY_MS)`);
+    await new Promise(r => setTimeout(r, startupDelay));
 
     // 2. Vincular worker antes de iniciar WhatsApp
     setReadyHook((cliente) => {

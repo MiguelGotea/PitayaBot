@@ -56,6 +56,18 @@ async function iniciarWhatsApp() {
     }
     logMsg(`🌐 Usando navegador: ${executablePath}`);
 
+    // Limpiar caché de Chrome ANTES de iniciar (evita acumulación en disco)
+    const { WSP_INSTANCIA } = require('../config/api');
+    const authPath = path.resolve(`.wwebjs_auth_${WSP_INSTANCIA}`);
+    const cacheSubdirs = ['Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'ShaderCache'];
+    cacheSubdirs.forEach(dir => {
+        const p = path.join(authPath, `session-${WSP_INSTANCIA}`, 'Default', dir);
+        if (fs.existsSync(p)) {
+            try { fs.rmSync(p, { recursive: true, force: true }); logMsg(`🗑️ Cache limpiado: ${dir}`); }
+            catch (e) { logMsg(`⚠️ No se pudo limpiar ${dir}: ${e.message}`); }
+        }
+    });
+
     // Limpiar SingletonLock si existe
     const cleanupLocks = () => {
         const { WSP_INSTANCIA } = require('../config/api');
