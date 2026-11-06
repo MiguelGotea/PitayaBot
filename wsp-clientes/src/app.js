@@ -148,10 +148,32 @@ async function arrancar() {
     // 3. Heartbeat: actualiza ultimo_ping cada 60s
     let _timeoutConsecutivos = 0; // Contador de TIMEOUT_GET_STATE consecutivos
     const MAX_TIMEOUTS_ANTES_RESET = 3; // Solo reiniciar tras 3 fallos seguidos
+    let _inicializandoDesde = null; // Para detectar "stuck in inicializando"
+    const MAX_INICIALIZANDO_MS = 8 * 60 * 1000; // 8 minutos máximo en estado inicializando
     setInterval(async () => {
         try {
             const estado = obtenerEstadoActual();
             let realWaState = 'N/A';
+
+            // ── WATCHDOG: Detectar "atascado en inicializando" ──
+            if (estado === 'inicializando') {
+                if (!_inicializandoDesde) _inicializandoDesde = Date.now();
+                const tiempoInicializando = Date.now() - _inicializandoDesde;
+                if (tiempoInicializando > MAX_INICIALIZANDO_MS) {
+                    logApp(`⌛ WATCHDOG: Lleva ${Math.round(tiempoInicializando / 60000)} min en 'inicializando' — forzando reset...`);
+                    _inicializandoDesde = null;
+                    _timeoutConsecutivos = 0;
+                    await resetearSesion(false);
+                    return;
+                }
+                // Aún dentro del límite — reportar heartbeat y esperar
+                logApp(`💓 Heartbeat [${WSP_INSTANCIA}] — estado: ${estado} | inicializando hace ${Math.round(tiempoInicializando / 60000)}min`);
+                await reportarEstadoVPS(estado, null).catch(() => {});
+                return;
+            } else {
+                // Si salió de 'inicializando', resetear el contador
+                _inicializandoDesde = null;
+            }
 
             // Intento de "despertar" WhatsApp y verificar que el engine no está congelado
             if (estado === 'conectado') {
