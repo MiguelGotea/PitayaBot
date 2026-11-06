@@ -49,6 +49,12 @@ async function ejecutarCicloNotificaciones() {
         console.log(`🔔 [NOTIF] Procesando ${data.notificaciones.length} notificación(es) transaccional(es)...`);
 
         for (const notif of data.notificaciones) {
+            // Verificar que Chrome sigue activo antes de cada envío
+            if (obtenerEstadoActual() !== 'conectado') {
+                console.log('⚠️ [NOTIF] Estado cambió durante envío — abortando ciclo, se reintentará en próximo tick');
+                break;
+            }
+
             const chatId = formatearNumeroWA(notif.celular);
             
             try {
@@ -57,6 +63,18 @@ async function ejecutarCicloNotificaciones() {
                 await reportarResultado(notif.id, 'exito', null);
                 console.log(`  ✅ [NOTIF] Enviada a ${notif.celular}`);
             } catch (err) {
+                // Si Chrome murió (detached Frame / Target closed), abortar todo el ciclo
+                // sin marcar como error — se reintentará cuando Chrome reconecte
+                const esChromemuerto = err.message && (
+                    err.message.includes('detached Frame') ||
+                    err.message.includes('Target closed') ||
+                    err.message.includes('Session closed') ||
+                    err.message.includes('Protocol error')
+                );
+                if (esChromemuerto) {
+                    console.log(`⚠️ [NOTIF] Chrome reiniciando — abortando ciclo para ${notif.celular}, se reintentará`);
+                    break; // No marcar como error — dejar pendiente para reintento
+                }
                 console.error(`  ❌ [NOTIF] Error enviando a ${notif.celular}:`, err.message);
                 await reportarResultado(notif.id, 'error', err.message);
             }

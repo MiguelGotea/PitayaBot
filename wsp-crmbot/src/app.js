@@ -155,7 +155,7 @@ async function arrancar() {
                         // Promise.race para evitar quedarnos colgados si la pestaña murió
                         realWaState = await Promise.race([
                             cliente.getState(),
-                            new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT_GET_STATE')), 10000))
+                            new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT_GET_STATE')), 30000))
                         ]);
                         if (realWaState === 'TIMEOUT' || realWaState === 'UNPAIRED') {
                             logApp(`⚠️  El estado real de WA reportó ${realWaState} — forzando reset_solicitado falso pero es preocupante`);

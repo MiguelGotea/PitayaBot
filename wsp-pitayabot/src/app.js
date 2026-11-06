@@ -152,7 +152,7 @@ async function arrancar() {
                         realWaState = await Promise.race([
                             cliente.getState(),
                             new Promise((_, reject) =>
-                                setTimeout(() => reject(new Error('TIMEOUT_GET_STATE')), 10000))
+                                setTimeout(() => reject(new Error('TIMEOUT_GET_STATE')), 30000))
                         ]);
 
                         // Forzar presencia "En línea" anti-zombie
