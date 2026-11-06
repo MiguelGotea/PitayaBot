@@ -140,6 +140,8 @@ async function arrancar() {
         });
 
     // 4. Heartbeat: actualiza ultimo_ping cada 60s + anti-zombie
+    let _timeoutConsecutivos = 0; // Contador de TIMEOUT_GET_STATE consecutivos
+    const MAX_TIMEOUTS_ANTES_RESET = 3; // Solo reiniciar tras 3 fallos seguidos
     setInterval(async () => {
         try {
             const estado = obtenerEstadoActual();
@@ -154,17 +156,28 @@ async function arrancar() {
                             new Promise((_, reject) =>
                                 setTimeout(() => reject(new Error('TIMEOUT_GET_STATE')), 30000))
                         ]);
+                        // Éxito: reset contador
+                        _timeoutConsecutivos = 0;
 
                         // Forzar presencia "En línea" anti-zombie
                         try { await cliente.sendPresenceAvailable(); } catch {}
 
                     } catch (e) {
+                        _timeoutConsecutivos++;
                         realWaState = `ERROR: ${e.message}`;
-                        logApp(`🚨 WhatsApp congelado → ${e.message}. Forzando recuperación...`);
-                        await resetearSesion(false);
-                        return;
+                        logApp(`🚨 WhatsApp inaccesible [${_timeoutConsecutivos}/${MAX_TIMEOUTS_ANTES_RESET}] → ${e.message}`);
+
+                        if (_timeoutConsecutivos >= MAX_TIMEOUTS_ANTES_RESET) {
+                            logApp(`🔁 ${MAX_TIMEOUTS_ANTES_RESET} fallos consecutivos — Forzando recuperación...`);
+                            _timeoutConsecutivos = 0;
+                            await resetearSesion(false);
+                            return;
+                        }
+                        // Aún no al límite: solo loguear, continuar
                     }
                 }
+            } else {
+                _timeoutConsecutivos = 0;
             }
 
             const data = await reportarEstadoVPS(estado, null);

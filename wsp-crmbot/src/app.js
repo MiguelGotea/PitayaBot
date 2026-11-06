@@ -142,6 +142,8 @@ async function arrancar() {
         });
 
     // 3. Heartbeat: actualiza ultimo_ping cada 60s
+    let _timeoutConsecutivos = 0; // Contador de TIMEOUT_GET_STATE consecutivos
+    const MAX_TIMEOUTS_ANTES_RESET = 3; // Solo reiniciar tras 3 fallos seguidos
     setInterval(async () => {
         try {
             const estado = obtenerEstadoActual();
@@ -157,6 +159,9 @@ async function arrancar() {
                             cliente.getState(),
                             new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT_GET_STATE')), 30000))
                         ]);
+                        // Éxito: reset contador
+                        _timeoutConsecutivos = 0;
+
                         if (realWaState === 'TIMEOUT' || realWaState === 'UNPAIRED') {
                             logApp(`⚠️  El estado real de WA reportó ${realWaState} — forzando reset_solicitado falso pero es preocupante`);
                         }
@@ -169,13 +174,23 @@ async function arrancar() {
                         }
 
                     } catch (e) {
+                        _timeoutConsecutivos++;
                         realWaState = `ERROR: ${e.message}`;
-                        logApp(`🚨 WhatsApp congelado / Inaccesible -> ${e.message}. Forzando AUTO-RECUPERACIÓN...`);
-                        // AUTO-RECUPERACIÓN: NO borrar carpeta de sesión (borrarSesion = false)
-                        await resetearSesion(false);
-                        return; // Salir de esta iteración
+                        logApp(`🚨 WhatsApp inaccesible [${_timeoutConsecutivos}/${MAX_TIMEOUTS_ANTES_RESET}] → ${e.message}`);
+
+                        if (_timeoutConsecutivos >= MAX_TIMEOUTS_ANTES_RESET) {
+                            logApp(`🔁 ${MAX_TIMEOUTS_ANTES_RESET} fallos consecutivos — Forzando AUTO-RECUPERACIÓN...`);
+                            _timeoutConsecutivos = 0;
+                            // AUTO-RECUPERACIÓN: NO borrar carpeta de sesión (borrarSesion = false)
+                            await resetearSesion(false);
+                            return; // Salir de esta iteración
+                        }
+                        // Si aún no llegó al límite, solo loguear y continuar heartbeat
                     }
                 }
+            } else {
+                // Si no está conectado, resetear contador
+                _timeoutConsecutivos = 0;
             }
 
             const data = await reportarEstadoVPS(estado, null);
