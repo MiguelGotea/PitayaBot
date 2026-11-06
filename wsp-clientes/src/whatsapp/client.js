@@ -18,7 +18,6 @@ const logMsg = (msg) => {
     console.log(`[PID:${pid}|UT:${ut}s] ${msg}`);
 };
 
-
 /**
  * Inicializa el cliente de whatsapp-web.js con sesión persistente.
  * La sesión se guarda en .wwebjs_auth/ (excluida del repo).
@@ -236,10 +235,10 @@ async function iniciarWhatsApp() {
 
     clienteWA.on('disconnected', async (reason) => {
         logMsg(`⚠️  WhatsApp desconectado: ${reason}`);
-        
+
         // Si fue un logout manual desde el teléfono, hay que borrar sesión
         const borrarCarpeta = (reason === 'LOGOUT');
-        
+
         // Usamos resetearSesion para asegurar limpieza de procesos Chrome
         resetearSesion(borrarCarpeta).catch(e => logMsg(`Error en reset tras desconexión: ${e.message}`));
     });
