@@ -4,7 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const { iniciarWhatsApp, obtenerEstado, obtenerQR, reportarEstadoVPS, obtenerEstadoActual, obtenerCliente, resetearSesion, setReadyHook } = require('./whatsapp/client');
 const { iniciarWorker } = require('./workers/campaign_worker');
-const { iniciarNotificationWorker } = require('./workers/notification_worker');
+const { iniciarNotificationWorker, estaEnviandoNotificaciones } = require('./workers/notification_worker');
 const { WSP_INSTANCIA } = require('./config/api');
 
 const logApp = (msg) => {
@@ -157,6 +157,19 @@ async function arrancar() {
             if (estado === 'conectado') {
                 const cliente = obtenerCliente();
                 if (cliente) {
+                    // Si el worker está activamente enviando mensajes, Chrome está ocupado —
+                    // omitir getState() para no causar timeout falso y contar como éxito
+                    if (estaEnviandoNotificaciones()) {
+                        logApp(`💓 Heartbeat [${WSP_INSTANCIA}] — estado: ${estado} | engine: BUSY (enviando notificaciones)`);
+                        _timeoutConsecutivos = 0; // No contar como fallo
+                        const data = await reportarEstadoVPS(estado, null);
+                        if (data && data.reset_solicitado) {
+                            logApp('🔄 Detectada solicitud de reset en heartbeat — ejecutando...');
+                            await resetearSesion(true);
+                        }
+                        return;
+                    }
+
                     try {
                         // Promise.race para evitar quedarnos colgados si la pestaña murió
                         realWaState = await Promise.race([

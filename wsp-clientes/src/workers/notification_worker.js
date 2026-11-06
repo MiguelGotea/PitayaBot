@@ -25,6 +25,14 @@ async function reportarResultado(id, resultado, detalle) {
 let ejecutandoCicloNotif = false;
 
 /**
+ * Indica si el worker está activamente enviando mensajes a través de Chrome.
+ * El heartbeat lo consulta para evitar llamar getState() mientras Chrome está ocupado.
+ */
+function estaEnviandoNotificaciones() {
+    return ejecutandoCicloNotif;
+}
+
+/**
  * Ciclo de envío de notificaciones (más frecuente que campañas)
  */
 async function ejecutarCicloNotificaciones() {
@@ -103,4 +111,4 @@ function iniciarNotificationWorker() {
     setInterval(ejecutarCicloNotificaciones, 15_000);
 }
 
-module.exports = { iniciarNotificationWorker };
+module.exports = { iniciarNotificationWorker, estaEnviandoNotificaciones };
